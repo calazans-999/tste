@@ -1,425 +1,295 @@
-# TaskFlow API
+# GUIA DE PROVA — StudyTrack API (90 minutos)
 
-API REST de gerenciamento de tarefas desenvolvida para estudo de **Java, Spring Boot, PostgreSQL, Docker, CI/CD e Microsoft Azure**.
+**Objetivo:** criar uma API Java simples, testar, containerizar, subir ao GitHub e publicar no **Azure App Service (Web App)** pelo Portal do Azure, com CI/CD via GitHub Actions quando o tempo e as permissões permitirem.
 
-**Projeto acadêmico — FIAP**  
-**Marcus Vinicius de Souza Calazans — RM 556620**
+> **Atenção:** roteiro de treino, não uma garantia de conclusão em 90 minutos. Pressupõe Java 21, Git, Docker Desktop, VS Code, conta GitHub e assinatura Azure configurados. Uma prova que exija banco de dados, autenticação ou outros requisitos precisará de ajustes. **Não implante recursos pagos sem necessidade; exclua-os ao final.**
 
-## Visão geral
+## Cronômetro
 
-O TaskFlow permite cadastrar, listar, consultar, atualizar e excluir tarefas, persistindo os dados em PostgreSQL. O projeto foi executado localmente com Docker Compose e publicado no **Azure Container Apps**, conectado ao **Azure Database for PostgreSQL Flexible Server**.
+| Tempo | Tarefa | Critério de conclusão |
+|---|---|---|
+| 00–20 min | Spring Boot + endpoints | GET e POST funcionam localmente |
+| 20–35 min | Testes e Docker | Imagem roda e `/actuator/health` responde |
+| 35–50 min | GitHub + Actions | Código enviado; CI executa |
+| 50–70 min | Portal Azure | Web App Linux configurado para container |
+| 70–85 min | Publicação e validação | URL HTTPS responde; pipeline de deploy se viável |
+| 85–90 min | Evidências | Prints e logs essenciais salvos |
 
-### Tecnologias
+**Regra de prova:** se uma etapa estiver bloqueada por mais de 5 minutos, guarde o erro e avance para outra parte que pontue. Reserve os últimos 5 minutos para evidências.
 
-- Java 21 e Spring Boot 4.1.2
-- Spring Web, Spring Data JPA, Bean Validation e Actuator
-- PostgreSQL 16
-- Maven Wrapper, JUnit e Mockito
-- Docker e Docker Compose
-- GitHub Actions (CI e publicação de imagem)
-- GitHub Container Registry (GHCR)
-- Azure Container Apps e Azure Database for PostgreSQL
+## 0. Pré-requisitos — confira ANTES de começar
 
-## Arquitetura
-
-```mermaid
-flowchart TD
-    A[Desenvolvedor] --> B[Repositório GitHub]
-    B --> C[GitHub Actions: testes com PostgreSQL]
-    C -->|CI aprovada| D[Build e push da imagem Docker]
-    D --> E[GitHub Container Registry]
-    E -->|Deploy manual no laboratório| F[Azure Container Apps]
-    F --> G[Azure Database for PostgreSQL]
+```powershell
+java -version
+git --version
+docker --version
+docker info
 ```
 
-> **Importante:** a execução dos testes e a publicação da imagem no GHCR estão automatizadas. O **deploy no Azure foi realizado manualmente**; ainda não há um fluxo de implantação contínua automatizado para Azure.
+- Java 21; Docker Desktop ligado; Git autenticado.
+- [Spring Initializr](https://start.spring.io/), [GitHub](https://github.com/), [Docker Hub](https://hub.docker.com/), [Portal Azure](https://portal.azure.com/).
+- O plano **App Service B1 pode gerar cobrança enquanto existir**, mesmo sem tráfego. Confira disponibilidade e região permitida na assinatura Azure for Students; no laboratório anterior, `francecentral` estava liberada.
+- **Atenção:** alguns ambientes ou assinaturas podem não permitir publicação de contêiner personalizado no plano escolhido. Verifique as opções reais no Portal antes de criar o serviço.
 
-## Funcionalidades e API REST
+## 1. Criar o projeto — 00–20 minutos
 
-| Método | Endpoint | Função |
-|---|---|---|
-| `GET` | `/actuator/health` | Verificar a saúde da aplicação |
-| `GET` | `/api/tarefas` | Listar tarefas |
-| `GET` | `/api/tarefas/{id}` | Consultar tarefa por ID |
-| `POST` | `/api/tarefas` | Cadastrar tarefa |
-| `PUT` | `/api/tarefas/{id}` | Atualizar tarefa |
-| `DELETE` | `/api/tarefas/{id}` | Excluir tarefa |
+Abra [start.spring.io](https://start.spring.io/) e selecione:
 
-Exemplo de requisição `POST /api/tarefas`:
+| Campo | Valor |
+|---|---|
+| Project / Language | Maven / Java |
+| Spring Boot | Versão estável compatível com Java 21 exibida no site |
+| Group | `br.com.fiap` |
+| Artifact / Name | `studytrack` |
+| Packaging / Java | Jar / 21 |
+| Dependencies | **Spring Web**, **Validation**, **Spring Boot Actuator** |
 
-```json
-{
-  "titulo": "Estudar DevOps",
-  "descricao": "Praticar GitHub Actions e Docker",
-  "status": "PENDENTE"
+Baixe e extraia para `C:\fiap26\studytrack`, de forma que o `pom.xml` fique nessa pasta.
+
+### Arquivos mínimos
+
+`src/main/java/br/com/fiap/studytrack/Estudo.java`
+
+```java
+package br.com.fiap.studytrack;
+
+public record Estudo(Long id, String materia, String descricao) {}
+```
+
+`src/main/java/br/com/fiap/studytrack/EstudoController.java`
+
+```java
+package br.com.fiap.studytrack;
+
+import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.server.ResponseStatusException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
+
+@RestController
+@RequestMapping("/api/estudos")
+public class EstudoController {
+    private final List<Estudo> estudos = new ArrayList<>();
+    private final AtomicLong ids = new AtomicLong();
+
+    @GetMapping
+    public synchronized List<Estudo> listar() {
+        return List.copyOf(estudos);
+    }
+
+    @PostMapping
+    @ResponseStatus(HttpStatus.CREATED)
+    public synchronized Estudo criar(@RequestBody Estudo entrada) {
+        if (entrada.materia() == null || entrada.materia().isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "materia obrigatoria");
+        }
+        Estudo novo = new Estudo(ids.incrementAndGet(), entrada.materia(), entrada.descricao());
+        estudos.add(novo);
+        return novo;
+    }
 }
 ```
 
-Status aceitos: `PENDENTE`, `EM_ANDAMENTO` e `CONCLUIDA`.
+> Armazenamento **em memória**: os registros somem ao reiniciar a aplicação. Este recorte foi escolhido para treinar deploy rapidamente e **não é um CRUD completo** (apenas leitura e criação).
 
-## Estrutura do projeto
-
-```text
-src/
-  main/
-    java/br/com/fiap/taskflow/
-      controller/TaskController.java
-      dto/TarefaRequest.java
-      exception/ApiExceptionHandler.java
-      model/Tarefa.java
-      model/StatusTarefa.java
-      repository/TarefaRepository.java
-      service/TaskService.java
-      TaskflowApplication.java
-    resources/application.properties
-  test/java/br/com/fiap/taskflow/
-    service/TaskServiceTest.java
-    TaskflowApplicationTests.java
-Dockerfile
-compose.yaml
-.dockerignore
-.env.example
-.github/workflows/ci.yml
-.github/workflows/docker-publish.yml
-pom.xml
-```
-
-## Requisitos
-
-- JDK 21
-- Docker Desktop com Docker Compose
-- PowerShell (comandos abaixo); os equivalentes Linux/macOS também são possíveis
-- Git
-- Azure CLI somente para etapas de nuvem
-- Conta GitHub e, para a nuvem, assinatura Azure com permissões adequadas
-
-## 1. Executar localmente com Docker
-
-Crie um arquivo `.env` baseado no `.env.example` na raiz do repositório:
-
-```dotenv
-DB_NAME=taskflow
-DB_USER=taskflow
-DB_PASSWORD=defina_uma_senha_local
-```
-
-Use uma senha exclusiva de desenvolvimento. **Nunca envie `.env`, senhas ou tokens para o Git.**
+No terminal:
 
 ```powershell
-docker compose config --quiet
-docker compose up -d --build
-docker compose ps
-```
-
-O Compose disponibiliza:
-
-- API em `http://localhost:8081`
-- PostgreSQL na porta local `5433`
-- Conexão interna da API com o serviço Docker `db:5432`
-
-Teste:
-
-```powershell
-Invoke-RestMethod http://localhost:8081/actuator/health
-Invoke-RestMethod http://localhost:8081/api/tarefas
-```
-
-Logs e encerramento:
-
-```powershell
-docker compose logs api --tail 50
-docker compose down
-```
-
-`docker compose down` **não remove o volume persistente** por padrão. Evite `docker compose down -v` se precisar conservar os dados.
-
-### Maven e testes
-
-Os testes de integração precisam de um PostgreSQL acessível. Com o serviço `db` do Compose iniciado, o Maven executado no Windows acessa o banco pela porta `5433`.
-
-```powershell
-docker compose up -d db
-$env:DB_PASSWORD = "SENHA_CONFIGURADA_NO_ENV"
+cd C:\fiap26\studytrack
 .\mvnw.cmd clean test
-.\mvnw.cmd clean package
-Remove-Item Env:DB_PASSWORD
+.\mvnw.cmd spring-boot:run
 ```
 
-No laboratório foram validados **4 testes automatizados**: três testes de serviço com Mockito e um teste de contexto Spring Boot.
-
-## 2. Git e GitHub
-
-Para publicar um repositório novo (crie-o vazio no GitHub antes):
+Em **outro** terminal PowerShell:
 
 ```powershell
+$local = "http://localhost:8080"
+Invoke-RestMethod "$local/actuator/health"
+Invoke-RestMethod "$local/api/estudos"
+Invoke-RestMethod "$local/api/estudos" -Method Post -ContentType "application/json" -Body '{"materia":"DevOps","descricao":"Treinar Azure"}'
+Invoke-RestMethod "$local/api/estudos"
+```
+
+**Esperado:** health `UP`, `POST` retorna `201` com ID e `GET` lista o estudo. Pare o Spring Boot com `Ctrl+C` antes de executar Docker na mesma porta.
+
+## 2. Docker — 20–35 minutos
+
+Na raiz do projeto, crie o `Dockerfile`:
+
+```dockerfile
+FROM eclipse-temurin:21-jre
+WORKDIR /app
+COPY target/*.jar app.jar
+EXPOSE 8080
+ENTRYPOINT ["java", "-jar", "/app/app.jar"]
+```
+
+Crie também `.dockerignore`:
+
+```gitignore
+.git
+.github
+.idea
+.vscode
+*.md
+```
+
+Execute:
+
+```powershell
+.\mvnw.cmd clean package
+
+docker build -t studytrack:local .
+docker run --rm -d --name studytrack-test -p 8081:8080 studytrack:local
+Invoke-RestMethod http://localhost:8081/actuator/health
+docker logs studytrack-test --tail 30
+docker stop studytrack-test
+```
+
+**Esperado:** `UP`. Se o JAR não for encontrado, confirme que `target/` contém o arquivo e que `mvn package` terminou sem erro. O Dockerfile acima requer compilação local prévia.
+
+## 3. GitHub e integração contínua — 35–50 minutos
+
+Crie um **repositório vazio** chamado `studytrack-api` na sua conta GitHub, sem README automático. Na raiz, crie `.gitignore` (se o Initializr não tiver criado):
+
+```gitignore
+/target/
+.env
+*.log
+.idea/
+.vscode/
+```
+
+Crie `.github/workflows/ci.yml`:
+
+```yaml
+name: Java CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Testar e empacotar
+        run: ./mvnw clean verify
+```
+
+Para o GitHub Actions em Linux, verifique se `mvnw` tem permissão de execução (`git update-index --chmod=+x mvnw` quando necessário). Se preferir evitar esse detalhe, troque `./mvnw clean verify` por `mvn -B clean verify` no workflow.
+
+```powershell
+cd C:\fiap26\studytrack
 git init
 git branch -M main
 git add .
-git diff --cached --check
 git status --short
-git commit -m "feat: implementa TaskFlow API"
-git remote add origin https://github.com/calazans-999/taskflow-api.git
+git commit -m "feat: cria StudyTrack API"
+git remote add origin https://github.com/SEU-USUARIO/studytrack-api.git
 git push -u origin main
 ```
 
-Para atualizações seguintes:
+Substitua `SEU-USUARIO`. Na página do GitHub, abra **Actions** e confira se o workflow ficou verde.
+
+## 4. Publicar imagem no Docker Hub — 35–50 ou 50–60 minutos
+
+Para seguir o exemplo de deploy em contêiner dos PDFs FIAP, use uma imagem **pública** no Docker Hub durante o treino:
 
 ```powershell
+docker login
+docker tag studytrack:local SEU-USUARIO-DOCKERHUB/studytrack-api:v1
+docker push SEU-USUARIO-DOCKERHUB/studytrack-api:v1
+```
+
+Confirme em [hub.docker.com](https://hub.docker.com/) que o repositório está público e a tag `v1` existe. **Não coloque credenciais em código-fonte.**
+
+> **Observação importante:** esses passos publicam a imagem manualmente. A CI acima automatiza os testes, não a publicação da imagem. O deploy automático será configurado como etapa adicional após a primeira implantação funcional.
+
+## 5. Criar o Azure Web App PELO PORTAL — 50–70 minutos
+
+Acesse [portal.azure.com](https://portal.azure.com/).
+
+1. **Resource groups** → **Create** → nome `rg-studytrack-prova`, região permitida pela assinatura (exemplo do laboratório: `France Central`).
+2. **Create a resource** → **Web App** → **Create**.
+3. **Subscription:** Azure for Students; **Resource group:** `rg-studytrack-prova`.
+4. **Name:** um nome globalmente exclusivo, por exemplo `studytrack-rm556620-2026` (se estiver disponível).
+5. **Publish:** **Container** (pode aparecer como opção de publicação em contêiner, conforme a interface atual); **Operating system:** **Linux**.
+6. **Region:** a mesma região permitida; **App Service Plan:** escolha um plano Linux compatível, por exemplo **Basic B1** se disponível na assinatura. **Confirme o preço na tela antes de criar.**
+7. **Container:** imagem do **Docker Hub**, repositório `SEU-USUARIO-DOCKERHUB/studytrack-api`, tag `v1`. Use imagem pública para dispensar credenciais do registro.
+8. Em configurações de aplicativo/variáveis de ambiente do Web App, adicione **`WEBSITES_PORT=8080`** caso o Portal não detecte automaticamente a porta do contêiner.
+9. **Review + create** → confira → **Create** → **Go to resource**.
+
+> O exemplo do PDF “Deployment na Nuvem” utiliza **App Service / Web App pelo Portal**; a configuração específica de Java em contêiner é uma adaptação ao nosso StudyTrack. Os rótulos e opções disponíveis podem variar no Portal.
+
+**URL:** `https://NOME-DO-SEU-WEBAPP.azurewebsites.net`
+
+```powershell
+$azure = "https://NOME-DO-SEU-WEBAPP.azurewebsites.net"
+Invoke-RestMethod "$azure/actuator/health" -TimeoutSec 120
+Invoke-RestMethod "$azure/api/estudos" -TimeoutSec 120
+```
+
+Se falhar, no Portal use **Web App → Log stream**, **Deployment Center**, **Configuration / Environment variables** e confira a imagem, a tag e a porta `8080`.
+
+## 6. CI/CD no Portal + GitHub Actions — 70–85 minutos (se disponível)
+
+A apostila de Continuous Integration mostra o uso de **GitHub Actions** e `azure/webapps-deploy` para automatizar o deploy no Web App. Em um treino de 90 minutos, faça a **primeira publicação manual** e só configure o deploy automático se o site já estiver funcional.
+
+**Opção guiada:** no Portal, abra **Web App → Deployment Center**, examine as opções de integração com GitHub / GitHub Actions disponíveis para **imagem de contêiner** e siga a configuração gerada para sua combinação de plano e registro. Verifique especialmente que ela **constrói/publica a imagem e só depois atualiza o Web App**; uma CI que só testa não realiza deploy. Dependendo da interface, a automação precisará de workflow e credenciais adicionais.
+
+**Não** presuma que escolher GitHub automaticamente cria um pipeline de contêiner correto. Valide em **GitHub → Actions** e no endpoint HTTPS publicado.
+
+## 7. Evidências — 85–90 minutos
+
+Capturas recomendadas:
+
+- [ ] `mvn test` / GitHub Actions verde
+- [ ] Docker Desktop ou terminal com imagem e endpoint `UP`
+- [ ] Imagem/tag pública no Docker Hub
+- [ ] Visão geral do Web App no Azure (nome, região, status)
+- [ ] Endpoint `/actuator/health` retornando `UP`
+- [ ] `POST` e `GET` da API no Azure (se funcionarem)
+- [ ] GitHub Actions de deploy verde **somente se de fato configurado**
+
+## 8. Limpeza de custos — após salvar as evidências
+
+No **Portal Azure**: **Resource groups** → `rg-studytrack-prova` → **Delete resource group** → confirme o nome do grupo. A exclusão apaga o Web App, o App Service Plan e quaisquer outros recursos dentro desse grupo.
+
+Se o laboratório anterior ainda existir, procure também `rg-taskflow-fiap`; ele é **separado**, e não é excluído quando você apaga `rg-studytrack-prova`.
+
+## Erros comuns e correções rápidas
+
+| Sintoma | Confira |
+|---|---|
+| `8080` ocupado | Pare o Spring Boot local ou use `8081:8080` no Docker |
+| Container sai imediatamente | `docker logs`, versão Java e JAR copiado |
+| Azure retorna 502/503 | Log stream, tag da imagem, `WEBSITES_PORT=8080`, inicialização |
+| GitHub Actions falha no Maven | Java 21, `mvnw` executável, `pom.xml` na raiz |
+| Web App não aparece na região | Política da assinatura e disponibilidade de SKU |
+| Imagem privada não baixa | Configure credenciais ou torne a imagem pública para o treino |
+| Cloud continua cobrando | Exclua o **Resource Group**, não somente o Web App |
+
+## Comandos para decorar
+
+```powershell
+.\mvnw.cmd clean test
+.\mvnw.cmd clean package
+docker build -t studytrack:local .
+docker run --rm -d --name studytrack-test -p 8081:8080 studytrack:local
+Invoke-RestMethod http://localhost:8081/actuator/health
+docker stop studytrack-test
 git add .
-git commit -m "docs: atualiza documentacao"
+git commit -m "feat: atualiza projeto"
 git push origin main
 ```
 
-## 3. CI/CD com GitHub Actions
-
-- `.github/workflows/ci.yml`: executa a integração contínua, preparando Java 21, PostgreSQL temporário e testes Maven.
-- `.github/workflows/docker-publish.yml`: após a aprovação da CI na `main`, constrói e publica a imagem no GHCR.
-
-A imagem publicada neste laboratório foi:
-
-```text
-ghcr.io/calazans-999/taskflow-api:830c553c34bd83eeae2f611ea2f139f0d1b4aca4
-```
-
-O pacote do laboratório é **privado**. Para baixá-lo localmente, utilize um token GitHub **Classic** com a permissão `read:packages`, sem expor seu conteúdo:
-
-```powershell
-$tokenSeguro = Read-Host "Token GitHub" -AsSecureString
-$token = [System.Net.NetworkCredential]::new("", $tokenSeguro).Password
-$token | docker login ghcr.io -u calazans-999 --password-stdin
-Remove-Variable token, tokenSeguro
-
-docker pull ghcr.io/calazans-999/taskflow-api:830c553c34bd83eeae2f611ea2f139f0d1b4aca4
-```
-
-## 4. Azure — Provisionamento de laboratório
-
-> **Atenção a custos e segurança:** os comandos desta seção **criam recursos que podem gerar cobrança**. Eles documentam o laboratório realizado, não uma configuração recomendada para produção. A política regional da assinatura utilizada permitia `francecentral`, entre outras regiões; confira as políticas da sua própria assinatura antes de executar.
-
-### Login, provedores e grupo de recursos
-
-```powershell
-az login
-az account show --output table
-az policy assignment list --query "[].{Nome:displayName,Parametros:parameters}" --output json
-
-az provider register --namespace Microsoft.App --wait
-az provider register --namespace Microsoft.DBforPostgreSQL --wait
-az provider register --namespace Microsoft.OperationalInsights --wait
-
-az group create --name rg-taskflow-fiap --location francecentral --output table
-```
-
-### PostgreSQL Flexible Server
-
-Crie uma senha forte e guarde-a em um gerenciador de senhas:
-
-```powershell
-$dbSeguro = Read-Host "Senha do PostgreSQL Azure" -AsSecureString
-$dbSenha = [System.Net.NetworkCredential]::new("", $dbSeguro).Password
-
-az postgres flexible-server create `
-  --resource-group rg-taskflow-fiap `
-  --name pg-taskflow-fiap-556620 `
-  --location francecentral `
-  --admin-user taskflowadmin `
-  --admin-password $dbSenha `
-  --version 16 `
-  --tier Burstable `
-  --sku-name Standard_B1ms `
-  --storage-size 32 `
-  --public-access None `
-  --backup-retention 7 `
-  --storage-auto-grow Disabled `
-  --output none
-
-az postgres flexible-server db create `
-  --resource-group rg-taskflow-fiap `
-  --server-name pg-taskflow-fiap-556620 `
-  --database-name taskflow
-```
-
-O nome do servidor deve ser globalmente único. Se ele já existir ou estiver indisponível, escolha outro e atualize as referências correspondentes.
-
-### Acesso de rede utilizado no laboratório
-
-O banco foi criado sem acesso público inicialmente. Para a implantação temporária com Container Apps sem rede virtual dedicada, foi habilitado o acesso público e criada uma regra permitindo origens de serviços Azure:
-
-```powershell
-az postgres flexible-server update `
-  --resource-group rg-taskflow-fiap `
-  --name pg-taskflow-fiap-556620 `
-  --public-access Enabled `
-  --output none
-
-az postgres flexible-server firewall-rule create `
-  --resource-group rg-taskflow-fiap `
-  --name pg-taskflow-fiap-556620 `
-  --rule-name permitir-azure-laboratorio `
-  --start-ip-address 0.0.0.0 `
-  --end-ip-address 0.0.0.0
-```
-
-**Risco:** a regra `0.0.0.0` neste serviço permite tentativas de conexão originadas de serviços Azure **de outras assinaturas**. Use somente em laboratório temporário, com credenciais fortes. Para produção, prefira rede privada e controles de acesso restritos.
-
-Para testar a conectividade do seu computador, libere temporariamente apenas seu IPv4 público:
-
-```powershell
-$meuIP = (Invoke-RestMethod "https://api.ipify.org").Trim()
-
-az postgres flexible-server firewall-rule create `
-  --resource-group rg-taskflow-fiap `
-  --name pg-taskflow-fiap-556620 `
-  --rule-name permitir-meu-pc `
-  --start-ip-address $meuIP `
-  --end-ip-address $meuIP
-
-Test-NetConnection pg-taskflow-fiap-556620.postgres.database.azure.com -Port 5432
-```
-
-`TcpTestSucceeded: True` confirma apenas conectividade TCP; a autenticação no PostgreSQL também deve ser testada.
-
-### Ambiente Azure Container Apps
-
-```powershell
-az extension add --name containerapp --upgrade
-
-az containerapp env create `
-  --name env-taskflow-fiap `
-  --resource-group rg-taskflow-fiap `
-  --location francecentral `
-  --logs-destination none `
-  --output table
-```
-
-### Implantar a API
-
-O token do GitHub deve ter `read:packages` e conseguir autenticar no GHCR. Informe o valor **da variável** no parâmetro `--registry-password` (não a string literal `secretref:...` nesse comando de criação):
-
-```powershell
-$ghSeguro = Read-Host "Token Classic do GitHub (read:packages)" -AsSecureString
-$ghToken = [System.Net.NetworkCredential]::new("", $ghSeguro).Password
-
-# Se a senha do banco não estiver na sessão, recupere-a com Read-Host também.
-
-az containerapp create `
-  --name taskflow-api `
-  --resource-group rg-taskflow-fiap `
-  --environment env-taskflow-fiap `
-  --image ghcr.io/calazans-999/taskflow-api:830c553c34bd83eeae2f611ea2f139f0d1b4aca4 `
-  --registry-server ghcr.io `
-  --registry-username calazans-999 `
-  --registry-password $ghToken `
-  --secrets "db-password=$dbSenha" `
-  --env-vars `
-    "SPRING_DATASOURCE_URL=jdbc:postgresql://pg-taskflow-fiap-556620.postgres.database.azure.com:5432/taskflow?sslmode=require" `
-    "SPRING_DATASOURCE_USERNAME=taskflowadmin" `
-    "SPRING_DATASOURCE_PASSWORD=secretref:db-password" `
-    "SPRING_JPA_OPEN_IN_VIEW=false" `
-  --ingress external `
-  --target-port 8080 `
-  --cpu 0.5 `
-  --memory 1.0Gi `
-  --min-replicas 0 `
-  --max-replicas 1 `
-  --output none
-```
-
-**Observações:** a senha do banco e o token são passados ao processo Azure CLI e podem ficar temporariamente visíveis a processos locais. Em produção, adote gestão de segredos com identidade gerenciada e serviços apropriados. A API do laboratório **não possui autenticação própria**, portanto não deve receber dados reais ou sensíveis enquanto exposta publicamente.
-
-Validação:
-
-```powershell
-az containerapp show `
-  --name taskflow-api `
-  --resource-group rg-taskflow-fiap `
-  --query "{Nome:name,Estado:properties.provisioningState,URL:properties.configuration.ingress.fqdn}" `
-  --output table
-
-az containerapp revision list `
-  --name taskflow-api `
-  --resource-group rg-taskflow-fiap `
-  --query "[].{Nome:name,Estado:properties.provisioningState,Saude:properties.healthState,Execucao:properties.runningState}" `
-  --output table
-```
-
-> Em ambientes Container Apps **Express**, o parâmetro `--revision-suffix` pode não ser suportado. O ambiente do laboratório foi criado nessa modalidade.
-
-## 5. Verificação do CRUD via HTTPS
-
-O endereço abaixo foi utilizado durante o laboratório; pode deixar de funcionar após a exclusão da infraestrutura.
-
-```powershell
-$url = "https://taskflow-api.whitehill-a93fa94a.francecentral.azurecontainerapps.io"
-
-Invoke-RestMethod "$url/actuator/health"
-Invoke-RestMethod "$url/api/tarefas"
-
-$novaTarefa = @{
-  titulo = "Finalizar projeto DevOps"
-  descricao = "CRUD validado na nuvem Azure"
-  status = "PENDENTE"
-} | ConvertTo-Json
-
-$criada = Invoke-RestMethod -Uri "$url/api/tarefas" `
-  -Method Post -ContentType "application/json" -Body $novaTarefa
-
-$atualizada = @{
-  titulo = "Finalizar projeto DevOps"
-  descricao = "Teste concluido"
-  status = "CONCLUIDA"
-} | ConvertTo-Json
-
-Invoke-RestMethod -Uri "$url/api/tarefas/$($criada.id)" `
-  -Method Put -ContentType "application/json" -Body $atualizada
-
-Invoke-RestMethod -Uri "$url/api/tarefas/$($criada.id)" -Method Delete
-Invoke-RestMethod "$url/api/tarefas"
-```
-
-**Resultados obtidos:** `/actuator/health` retornou `UP`; o Container App atingiu `Provisioned / Healthy / Running`; `POST`, `GET`, `PUT` e `DELETE` foram executados no Azure.
-
-## 6. Diagnóstico rápido
-
-| Sintoma | Verificar |
-|---|---|
-| `403 Forbidden` ao baixar imagem privada | Token GitHub Classic `read:packages`, `docker login`, registro e segredo do GHCR |
-| `Container crashing` | Logs, estado da revisão, variáveis de ambiente e conexão com PostgreSQL |
-| `SocketTimeoutException: Connect timed out` | Rede, porta 5432, acesso público e regras de firewall |
-| `FATAL: password authentication failed` | Usuário e senha do PostgreSQL, incluindo segredo `db-password` no Container Apps |
-| `ScaledToZero` | Normal com `--min-replicas 0` quando não há tráfego |
-| `KeyError: eventStreamEndpoint` nos logs CLI | Limitação ou erro de consulta de logs, especialmente sem destino de logs configurado |
-
-Caso seja necessário trocar a senha do administrador, atualize **a senha real do PostgreSQL e o segredo da aplicação com o mesmo valor**. Uma revisão pode precisar ser atualizada para utilizar o novo segredo.
-
-## 7. Limpeza obrigatória do laboratório
-
-**Antes de excluir, salve capturas e evidências necessárias.** Excluir o Resource Group apaga os serviços implantados e o banco, incluindo seus dados. O GitHub e as imagens do GHCR permanecem.
-
-```powershell
-az group delete --name rg-taskflow-fiap --yes
-az group exists --name rg-taskflow-fiap
-```
-
-O resultado esperado da segunda consulta é `false`, após a conclusão da exclusão.
-
-Remova também variáveis e arquivos temporários contendo credenciais:
-
-```powershell
-Remove-Item (Join-Path $env:TEMP "taskflow-azure-debug.env") -Force -ErrorAction SilentlyContinue
-Remove-Variable dbSenha, dbSeguro, ghToken, ghSeguro -ErrorAction SilentlyContinue
-```
-
-## Evidências recomendadas para a entrega
-
-1. Resultado dos testes Maven e endpoint `/actuator/health`.
-2. Containers locais funcionando com Docker Compose.
-3. Execuções aprovadas do GitHub Actions.
-4. Imagem publicada no GitHub Container Registry.
-5. PostgreSQL e Container App provisionados no Azure.
-6. Revisão `Healthy` e operações CRUD executadas via HTTPS.
-7. Confirmação da exclusão dos recursos pagos após o laboratório.
-
----
-
-**Nota:** este README registra uma execução acadêmica real e fornece um roteiro de reprodução. Para uso em produção, são necessários ajustes de segurança, rede privada, autenticação da API, migrações controladas de banco e observabilidade.
+**Prioridade para a prova:** projeto inicializa → testes passam → Docker funciona → GitHub Actions roda → Web App responde HTTPS → evidências salvas. Não perca todo o tempo depurando uma melhoria opcional.
